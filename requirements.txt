@@ -1,0 +1,8 @@
+python-telegram-bot
+aiohttp
+anthropic
+tenacity
+python-dotenv
+pydantic
+pydantic-settings
+aiosqlite
