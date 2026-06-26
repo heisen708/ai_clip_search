@@ -62,22 +62,27 @@ def _fallback_result(title: str, description: str, reject_keywords: list[str]) -
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
 async def _call_claude(title: str, description: str, hashtags: str) -> dict:
-    message = await _client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=400,
-        system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Title: {title}\n"
-                f"Description: {description[:500]}\n"
-                f"Hashtags: {hashtags}"
-            ),
-        }],
+    response = await _client.chat.completions.create(
+        model="meta-llama/llama-3.3-8b-instruct:free",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Title: {title}\nDescription: {description[:500]}\nHashtags: {hashtags}",
+            },
+        ],
     )
-    text = "".join(block.text for block in message.content if hasattr(block, "text")).strip()
-    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(text)
+
+    text = response.choices[0].message.content.strip()
+
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+
+    return json.loads(text.strip())
 
 
 async def classify_video(title: str, description: str, hashtags: str, reject_keywords: list[str]) -> dict:
