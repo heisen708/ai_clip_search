@@ -1,0 +1,48 @@
+# Koyeb deployment manifest for GadgetBot
+# Deploy via: koyeb app init gadgetbot --manifest koyeb.yaml
+# Or paste this into the Koyeb dashboard → App → Advanced → Manifest
+
+name: gadgetbot
+
+services:
+  - name: bot
+    type: worker          # No inbound HTTP — long-polling Telegram bot
+    instance_type: nano   # 0.1 vCPU / 256 MB RAM — sufficient for polling + Playwright
+    regions:
+      - was               # Washington DC; pick the region closest to your MongoDB Atlas cluster
+    deployment:
+      docker:
+        image: ""         # Fill in after pushing to your container registry,
+                          # e.g. ghcr.io/yourname/gadgetbot:latest
+      # Alternatively, use Koyeb's native git builder:
+      # git:
+      #   repository: https://github.com/yourname/gadgetbot
+      #   branch: main
+      #   build_command: ""          # Dockerfile is auto-detected
+    env:
+      - key: TELEGRAM_BOT_TOKEN
+        value: ""         # Set via Koyeb secrets — do NOT commit real values here
+      - key: TELEGRAM_CHAT_ID
+        value: ""
+      - key: MONGODB_URI
+        value: ""
+      - key: GEMINI_API_KEY
+        value: ""
+      - key: GEMINI_MODEL
+        value: "gemini-2.0-flash"
+      - key: PLAYWRIGHT_BROWSER
+        value: "chromium"
+      - key: PLAYWRIGHT_TIMEOUT_MS
+        value: "15000"
+      - key: MIN_QUALITY_SCORE
+        value: "40"
+      - key: SCAN_INTERVAL_MINUTES
+        value: "30"
+      - key: MAX_VIDEOS_PER_SCAN
+        value: "5"
+    # Koyeb worker services don't need an HTTP health check, but you can
+    # add a /healthz endpoint to bot.py if you switch to the web type.
+    health_checks: []
+    scaling:
+      min: 1
+      max: 1             # Keep exactly one instance — Telegram polling must be single-instance
