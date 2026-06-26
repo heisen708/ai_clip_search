@@ -303,6 +303,29 @@ async def video_exists(video_id: str) -> bool:
         > 0
     )
 
+async def add_history(video: dict):
+    database = get_db()
+
+    await database.history.insert_one({
+        "video_id": video["video_id"],
+        "title": video.get("title"),
+        "url": video.get("url"),
+        "source": video.get("source"),
+        "sent_at": _now(),
+    })
+
+
+async def get_history(limit: int = 20):
+    database = get_db()
+
+    cursor = (
+        database.history.find()
+        .sort("sent_at", DESCENDING)
+        .limit(limit)
+    )
+
+    return [doc async for doc in cursor]
+
 
 # ── Favorites ────────────────────────────────────────────────────────────────
 
