@@ -49,7 +49,7 @@ COPY --from=builder /install /usr/local
 # (playwright package is already in /usr/local from builder stage)
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
  
-RUN python -m playwright install chromium
+RUN playwright install chromium
 
 # Copy application source
 COPY . .
