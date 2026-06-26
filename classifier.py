@@ -7,14 +7,17 @@ the AI call fails, so the pipeline never hard-crashes on an API hiccup.
 import json
 import logging
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import settings
 
 logger = logging.getLogger("gadgetbot.ai.classifier")
 
-_client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+_client = AsyncOpenAI(
+    api_key=settings.openrouter_api_key,
+    base_url="https://openrouter.ai/api/v1",
+) if settings.openrouter_api_key else None
 
 SYSTEM_PROMPT = """You are a content classifier for a YouTube Shorts creator who makes \
 gadget-reveal videos by adding voiceover/commentary on top of short clips of physical \
