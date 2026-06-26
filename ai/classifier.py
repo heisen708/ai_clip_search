@@ -1,23 +1,43 @@
 """
-Single Claude call per video that returns gadget-relevance classification,
+Single Gemini call per video that returns gadget-relevance classification,
 product detection, and a one-sentence summary together (cheaper and faster
 than three separate calls). Falls back to a conservative keyword check if
 the AI call fails, so the pipeline never hard-crashes on an API hiccup.
+
+Uses the Google Gemini API directly (google-generativeai SDK).
+Set GEMINI_API_KEY in your .env file.
 """
+from __future__ import annotations
+
 import json
 import logging
 
-from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config.settings import settings
 
 logger = logging.getLogger("gadgetbot.ai.classifier")
 
-_client = AsyncOpenAI(
-    api_key=settings.openrouter_api_key,
-    base_url="https://openrouter.ai/api/v1",
-) if settings.openrouter_api_key else None
+# Lazy-initialise the Gemini client only when an API key is present
+_gemini_model = None
+
+
+def _get_model():
+    global _gemini_model
+    if _gemini_model is not None:
+        return _gemini_model
+    if not settings.gemini_api_key:
+        return None
+    try:
+        import google.generativeai as genai  # type: ignore[import]
+        genai.configure(api_key=settings.gemini_api_key)
+        _gemini_model = genai.GenerativeModel(settings.gemini_model)
+        logger.info("Gemini model initialised: %s", settings.gemini_model)
+    except Exception:
+        logger.exception("Failed to initialise Gemini model")
+        _gemini_model = None
+    return _gemini_model
+
 
 SYSTEM_PROMPT = """You are a content classifier for a YouTube Shorts creator who makes \
 gadget-reveal videos by adding voiceover/commentary on top of short clips of physical \
@@ -60,38 +80,56 @@ def _fallback_result(title: str, description: str, reject_keywords: list[str]) -
     }
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
-async def _call_claude(title: str, description: str, hashtags: str) -> dict:
-    response = await _client.chat.completions.create(
-        model="meta-llama/llama-3.3-8b-instruct:free",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"Title: {title}\nDescription: {description[:500]}\nHashtags: {hashtags}",
-            },
-        ],
-    )
-
-    text = response.choices[0].message.content.strip()
-
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences that Gemini sometimes wraps JSON in."""
+    text = text.strip()
     if text.startswith("```json"):
         text = text[7:]
-    if text.startswith("```"):
+    elif text.startswith("```"):
         text = text[3:]
     if text.endswith("```"):
         text = text[:-3]
+    return text.strip()
 
-    return json.loads(text.strip())
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=5))
+async def _call_gemini(title: str, description: str, hashtags: str) -> dict:
+    import asyncio
+
+    model = _get_model()
+    if model is None:
+        raise RuntimeError("Gemini model not available")
+
+    user_content = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"Title: {title}\n"
+        f"Description: {description[:500]}\n"
+        f"Hashtags: {hashtags}"
+    )
+
+    # google-generativeai is synchronous; run in executor to avoid blocking
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: model.generate_content(user_content),
+    )
+
+    text = _strip_fences(response.text)
+    return json.loads(text)
 
 
-async def classify_video(title: str, description: str, hashtags: str, reject_keywords: list[str]) -> dict:
-    if _client is None:
-        logger.warning("ANTHROPIC_API_KEY not set; using keyword-only fallback classifier.")
+async def classify_video(
+    title: str,
+    description: str,
+    hashtags: str,
+    reject_keywords: list[str],
+) -> dict:
+    if _get_model() is None:
+        logger.warning("GEMINI_API_KEY not set or model unavailable; using keyword-only fallback classifier.")
         return _fallback_result(title, description, reject_keywords)
 
     try:
-        return await _call_claude(title, description or "", hashtags or "")
+        return await _call_gemini(title, description or "", hashtags or "")
     except Exception:
-        logger.exception("Claude classification failed, using fallback for %r", title)
+        logger.exception("Gemini classification failed, using fallback for %r", title)
         return _fallback_result(title, description, reject_keywords)
