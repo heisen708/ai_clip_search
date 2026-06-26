@@ -27,15 +27,14 @@ class Settings(BaseSettings):
     mongodb_uri: str = Field(..., description="MongoDB Atlas connection string")
     mongodb_db: str = Field("gadget_bot", description="Database name")
 
-    # ── OpenRouter / AI ──────────────────────────────────────────────────────
-    openrouter_api_key: str | None = Field(None, description="OpenRouter API key")
-    openrouter_model: str = Field(
-        "meta-llama/llama-3.3-8b-instruct:free",
-        description="Model slug on OpenRouter",
+    # ── Gemini AI ────────────────────────────────────────────────────────────
+    gemini_api_key: str | None = Field(None, description="Google Gemini API key")
+    gemini_model: str = Field(
+        "gemini-2.0-flash",
+        description="Gemini model name",
     )
 
-    # ── YouTube Data API v3 ──────────────────────────────────────────────────
-    youtube_api_key: str | None = Field(None, description="Google YouTube Data API v3 key")
+    # ── YouTube Playwright scraper ───────────────────────────────────────────
     youtube_search_queries: List[str] = Field(
         default=[
             "gadget review shorts",
@@ -48,9 +47,13 @@ class Settings(BaseSettings):
             "desk gadget shorts",
             "novelty gadget shorts",
         ],
-        description="Search queries sent to YouTube",
+        description="Search queries used to scrape YouTube Shorts",
     )
     youtube_max_results: int = Field(20, description="Results per query")
+    # Playwright browser: chromium, firefox, or webkit
+    playwright_browser: str = Field("chromium", description="Playwright browser engine")
+    # Seconds to wait for YouTube search results to load
+    playwright_timeout_ms: int = Field(15_000, description="Playwright navigation timeout (ms)")
 
     # ── TikTok hashtags ──────────────────────────────────────────────────────
     tiktok_hashtags: List[str] = Field(
