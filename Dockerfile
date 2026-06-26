@@ -48,8 +48,8 @@ COPY --from=builder /install /usr/local
 # Install Playwright browser binaries into the image
 # (playwright package is already in /usr/local from builder stage)
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install chromium --with-deps || \
-    python -m playwright install chromium --with-deps
+ 
+RUN python -m playwright install chromium
 
 # Copy application source
 COPY . .
