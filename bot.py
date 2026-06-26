@@ -22,8 +22,8 @@ detail:<id>  – show full classification details
 skip:<id>    – mark as skipped (no-op placeholder)
 export_fav   – export favourites as CSV
 """
-from aiohttp import web
 from __future__ import annotations
+from aiohttp import web
 
 import asyncio
 import io
