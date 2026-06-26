@@ -293,6 +293,16 @@ async def get_recent_sent(limit: int = 20) -> list[dict[str, Any]]:
     )
     return [doc async for doc in cursor]
 
+async def video_exists(video_id: str) -> bool:
+    database = get_db()
+    return (
+        await database.videos.count_documents(
+            {"video_id": video_id},
+            limit=1,
+        )
+        > 0
+    )
+
 
 # ── Favorites ────────────────────────────────────────────────────────────────
 
