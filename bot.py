@@ -22,6 +22,7 @@ detail:<id>  – show full classification details
 skip:<id>    – mark as skipped (no-op placeholder)
 export_fav   – export favourites as CSV
 """
+from aiohttp import web
 from __future__ import annotations
 
 import asyncio
@@ -318,11 +319,32 @@ async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_init(app: Application) -> None:
     await db.connect()
+    await start_health_server()
     logger.info("Bot started. Commands registered.")
 
 
 async def post_shutdown(app: Application) -> None:
     await db.disconnect()
+    
+async def health(request):
+    return web.Response(text="OK")
+
+
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.environ.get("PORT", 8080))
+
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logger.info(f"Health server running on port {port}")
+
 
 
 def main() -> None:
