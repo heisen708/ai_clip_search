@@ -65,4 +65,4 @@ RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app /ms-playwright
 USER botuser
 
 # Start the bot
-CMD ["python", "-m", "bot"]
+CMD ["python", "bot.py"]
