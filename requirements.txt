@@ -1,6 +1,6 @@
 python-telegram-bot
 aiohttp
-openai
+google-genai
 tenacity
 python-dotenv
 pydantic
