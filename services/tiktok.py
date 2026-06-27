@@ -1,17 +1,31 @@
 """
-TikTok hashtag scraper.
+TikTok hashtag scraper — server-rendered HTML extraction.
 
-TikTok has no official public API, so we hit the same JSON endpoint
-the mobile web app uses.  This is inherently fragile; failures are
-caught and logged gracefully so they never crash the pipeline.
+The old implementation called TikTok's unofficial mobile-app JSON API
+(`/api/challenge/detail/`, `/api/challenge/item_list/`) directly. That API
+now requires a signed `_signature`/X-Bogus payload that only TikTok's own
+JS produces, so plain server-side requests to it are rejected outright —
+that's why every hashtag failed to resolve.
 
-If TikTok starts requiring a login cookie, set TIKTOK_SESSION_ID in
-.env and it will be forwarded automatically.
+This version instead requests the *public, server-rendered* hashtag page
+(https://www.tiktok.com/tag/<hashtag>) the same way a logged-out browser
+or search-engine crawler would. TikTok renders the first page of videos
+for each hashtag directly into the HTML as a JSON blob inside a
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"> tag (with a fallback to
+the older `SIGI_STATE` tag some regions/CDN nodes still serve). We parse
+that JSON — no headless browser, no login, no cookies, no proxy, and no
+captcha involved, since this is the literal HTML TikTok ships to anyone
+loading the hashtag page.
+
+This is inherently a bit fragile (TikTok can reshape this JSON without
+notice), so every step is defensive: a failed hashtag is logged and
+skipped, never raised, exactly like the previous implementation.
 """
 from __future__ import annotations
 
+import json
 import logging
-import os
+import re
 from typing import Any
 
 import aiohttp
@@ -20,58 +34,110 @@ from config.settings import settings
 
 logger = logging.getLogger("gadgetbot.services.tiktok")
 
-# Unofficial TikTok hashtag challenge API (used by the web client)
-_HASHTAG_INFO_URL = "https://www.tiktok.com/api/challenge/detail/"
-_HASHTAG_FEED_URL = "https://www.tiktok.com/api/challenge/item_list/"
+_HASHTAG_PAGE_URL = "https://www.tiktok.com/tag/{tag}"
 
 _HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/112.0.0.0 Mobile Safari/537.36 TikTok/27.8.5"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.tiktok.com/",
 }
 
+# Matches the modern rehydration payload TikTok embeds in hashtag pages.
+_UNIVERSAL_DATA_RE = re.compile(
+    r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+    re.DOTALL,
+)
 
-def _cookies() -> dict[str, str]:
-    sid = os.getenv("TIKTOK_SESSION_ID", "")
-    return {"sessionid": sid} if sid else {}
+# Older/alternate payload some edge nodes still serve.
+_SIGI_STATE_RE = re.compile(
+    r'<script id="SIGI_STATE"[^>]*>(.*?)</script>',
+    re.DOTALL,
+)
 
 
-async def _get_challenge_id(session: aiohttp.ClientSession, hashtag: str) -> str | None:
-    params = {
-        "challengeName": hashtag,
-        "aid": "1988",
-    }
+def _extract_json_blob(html: str) -> dict[str, Any] | None:
+    """Pull whichever embedded state blob is present out of the raw HTML."""
+    m = _UNIVERSAL_DATA_RE.search(html)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if data:
+            return {"kind": "universal", "data": data}
+
+    m = _SIGI_STATE_RE.search(html)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if data:
+            return {"kind": "sigi", "data": data}
+
+    return None
+
+
+def _items_from_universal(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Walk the __UNIVERSAL_DATA_FOR_REHYDRATION__ structure to find the list
+    of item (video) dicts for the hashtag/challenge page. The exact nesting
+    has shifted across TikTok releases, so we search defensively instead of
+    hardcoding one fixed path.
+    """
     try:
-        async with session.get(
-            _HASHTAG_INFO_URL,
-            params=params,
-            headers=_HEADERS,
-            cookies=_cookies(),
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json(content_type=None)
-            return data.get("challengeInfo", {}).get("challenge", {}).get("id")
-    except Exception:
-        logger.debug("Could not resolve TikTok challenge ID for #%s", hashtag)
-        return None
+        scope = data["__DEFAULT_SCOPE__"]
+    except (KeyError, TypeError):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for key, value in scope.items():
+        if not isinstance(value, dict):
+            continue
+        if "challenge" not in key and "hashtag" not in key.lower():
+            continue
+        items = value.get("itemList") or value.get("items") or []
+        if isinstance(items, list) and items:
+            candidates = items
+            break
+
+    if not candidates:
+        # Fall back: scan every dict value in scope for an itemList, in case
+        # the page used a key name we didn't anticipate.
+        for value in scope.values():
+            if isinstance(value, dict):
+                items = value.get("itemList")
+                if isinstance(items, list) and items:
+                    candidates = items
+                    break
+
+    return candidates
 
 
-def _extract_video(item: dict) -> dict[str, Any] | None:
-    """Parse one TikTok item dict into our normalised schema."""
+def _items_from_sigi(data: dict[str, Any]) -> list[dict[str, Any]]:
+    item_module = data.get("ItemModule") or {}
+    return list(item_module.values()) if isinstance(item_module, dict) else []
+
+
+def _extract_video(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse one TikTok item dict (either payload shape) into our schema."""
     try:
-        vid_id = item.get("id") or item.get("video", {}).get("id")
-        if not vid_id:
+        video_id = item.get("id") or (item.get("video") or {}).get("id")
+        if not video_id:
             return None
 
-        stats = item.get("stats", {})
-        author = item.get("author", {})
-        video = item.get("video", {})
-        desc = item.get("desc", "")
+        stats = item.get("stats") or item.get("statsV2") or {}
+        author = item.get("author") or {}
+        if isinstance(author, str):
+            # SIGI_STATE sometimes stores author as just a user id string;
+            # without a join to UserModule we only have the id to work with.
+            author = {"uniqueId": author, "nickname": author}
+        video = item.get("video") or {}
+        desc = item.get("desc") or ""
 
         cover = (
             video.get("originCover")
@@ -80,26 +146,56 @@ def _extract_video(item: dict) -> dict[str, Any] | None:
             or ""
         )
 
+        def _num(key: str) -> int:
+            val = stats.get(key, 0)
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return 0
+
+        unique_id = author.get("uniqueId") or author.get("nickname") or "unknown"
+
         return {
-            "video_id": f"tt_{vid_id}",
+            "video_id": f"tt_{video_id}",
             "source": "tiktok",
-            "url": f"https://www.tiktok.com/@{author.get('uniqueId', 'unknown')}/video/{vid_id}",
+            "url": f"https://www.tiktok.com/@{unique_id}/video/{video_id}",
             "title": desc[:200],
             "description": desc,
             "hashtags": " ".join(
-                f"#{c['hashtagName']}" for c in item.get("challenges", []) if c.get("hashtagName")
+                f"#{c.get('hashtagName')}"
+                for c in item.get("challenges", []) or []
+                if isinstance(c, dict) and c.get("hashtagName")
             ),
-            "channel": author.get("nickname") or author.get("uniqueId", ""),
+            "channel": author.get("nickname") or unique_id,
             "thumbnail": cover,
             "upload_time": str(item.get("createTime", "")),
-            "views": int(stats.get("playCount", 0)),
-            "likes": int(stats.get("diggCount", 0)),
-            "comments": int(stats.get("commentCount", 0)),
-            "duration_seconds": int(video.get("duration", 0)),
+            "views": _num("playCount"),
+            "likes": _num("diggCount"),
+            "comments": _num("commentCount"),
+            "duration_seconds": int((video.get("duration") or 0) or 0),
             "has_thumbnail": bool(cover),
         }
     except Exception:
         logger.debug("Failed to parse TikTok item", exc_info=True)
+        return None
+
+
+async def _fetch_hashtag_page(
+    session: aiohttp.ClientSession, hashtag: str
+) -> str | None:
+    url = _HASHTAG_PAGE_URL.format(tag=hashtag)
+    try:
+        async with session.get(
+            url,
+            headers=_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning("TikTok hashtag page #%s returned HTTP %s", hashtag, resp.status)
+                return None
+            return await resp.text()
+    except Exception:
+        logger.warning("TikTok hashtag page request failed for #%s", hashtag, exc_info=True)
         return None
 
 
@@ -108,69 +204,56 @@ async def _fetch_hashtag_videos(
     hashtag: str,
     max_count: int,
 ) -> list[dict[str, Any]]:
-    challenge_id = await _get_challenge_id(session, hashtag)
-    if not challenge_id:
+    html = await _fetch_hashtag_page(session, hashtag)
+    if not html:
         logger.warning("TikTok: could not resolve #%s — skipping", hashtag)
         return []
 
-    videos: list[dict] = []
-    cursor = 0
+    blob = _extract_json_blob(html)
+    if not blob:
+        logger.warning("TikTok: could not resolve #%s — skipping", hashtag)
+        return []
 
-    while len(videos) < max_count:
-        params = {
-            "challengeID": challenge_id,
-            "count": min(30, max_count - len(videos)),
-            "cursor": cursor,
-            "aid": "1988",
-        }
-        try:
-            async with session.get(
-                _HASHTAG_FEED_URL,
-                params=params,
-                headers=_HEADERS,
-                cookies=_cookies(),
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("TikTok feed %s returned HTTP %s", hashtag, resp.status)
-                    break
-                data = await resp.json(content_type=None)
-        except Exception:
-            logger.exception("TikTok feed request failed for #%s", hashtag)
+    if blob["kind"] == "universal":
+        raw_items = _items_from_universal(blob["data"])
+    else:
+        raw_items = _items_from_sigi(blob["data"])
+
+    if not raw_items:
+        logger.warning("TikTok: #%s page loaded but contained no videos", hashtag)
+        return []
+
+    videos: list[dict[str, Any]] = []
+    for item in raw_items:
+        parsed = _extract_video(item)
+        if parsed:
+            videos.append(parsed)
+        if len(videos) >= max_count:
             break
 
-        items = data.get("itemList") or data.get("item_list") or []
-        if not items:
-            break
-
-        for item in items:
-            parsed = _extract_video(item)
-            if parsed:
-                videos.append(parsed)
-
-        if not data.get("hasMore", False):
-            break
-        cursor = data.get("cursor", cursor + len(items))
-
-    return videos[:max_count]
+    return videos
 
 
 async def fetch_tiktok_videos() -> list[dict[str, Any]]:
     """
-    Iterate over all configured hashtags, collect videos, and return
-    a deduplicated list.  Never raises — failures per hashtag are logged.
+    Iterate over all configured hashtags, collect videos from each
+    hashtag's server-rendered page, and return a deduplicated list.
+    Never raises — failures per hashtag are logged and skipped.
     """
     seen: set[str] = set()
-    all_videos: list[dict] = []
+    all_videos: list[dict[str, Any]] = []
 
     async with aiohttp.ClientSession() as session:
         for tag in settings.tiktok_hashtags:
             try:
                 vids = await _fetch_hashtag_videos(session, tag, settings.tiktok_max_per_hashtag)
+                new_count = 0
                 for v in vids:
                     if v["video_id"] not in seen:
                         seen.add(v["video_id"])
                         all_videos.append(v)
+                        new_count += 1
+                logger.debug("Hashtag #%s returned %d new videos", tag, new_count)
             except Exception:
                 logger.exception("TikTok hashtag #%s failed", tag)
 
