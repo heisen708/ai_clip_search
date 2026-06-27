@@ -18,28 +18,8 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-# Playwright system deps (chromium) — installed by the official helper script
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # Chromium runtime libraries
-        libnss3 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libcups2 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxfixes3 \
-        libxrandr2 \
-        libgbm1 \
-        libxkbcommon0 \
-        libpango-1.0-0 \
-        libcairo2 \
-        libasound2 \
-        libgtk-3-0 \
-        # Font support (avoids Chromium glyph-rendering warnings)
-        fonts-liberation \
-        # Misc
         ca-certificates \
-        wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
@@ -47,9 +27,7 @@ COPY --from=builder /install /usr/local
 
 # Install Playwright browser binaries into the image
 # (playwright package is already in /usr/local from builder stage)
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
- 
-RUN playwright install chromium
+
 
 # Copy application source
 COPY . .
@@ -61,7 +39,7 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Non-root user for security
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app /ms-playwright
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
 
 # Start the bot
